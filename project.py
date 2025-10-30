@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Team 2 — Plant Disease (Beans) (Image Classification)
+Team 2 — Bean Plant Disease Classification 🌱
 Dataset: therealoise/bean-disease-dataset (Kaggle)
-Modality: image (3-class)
-Goal: Detect healthy vs two bean leaf diseases
-Target: ≥92% test accuracy with a tiny CNN
+Goal: Classify bean leaves as healthy or diseased (3 classes)
+Model: Lightweight CNN (TinyCNN)
 """
 
+# -------------------------
+# Imports
+# -------------------------
 import os
 import json
 import numpy as np
+from collections import Counter
+import kagglehub
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -22,26 +26,23 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
 )
-from collections import Counter
 import matplotlib.pyplot as plt
 import seaborn as sns
-import kagglehub
 
 
 # -------------------------
 # 1️⃣ Load and Split Data
 # -------------------------
-def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.15, test_split=0.15):
+def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.1, test_split=0.1):
     """Download and prepare stratified train/val/test splits."""
     path = kagglehub.dataset_download(dataset_id)
     print("✅ Dataset downloaded to:", path)
 
-    # Dataset expected as Bean_Dataset/<class_name>/
     data_dir = os.path.join(path, "Bean_Dataset")
     full_dataset = datasets.ImageFolder(root=data_dir)
     labels = np.array([y for _, y in full_dataset.samples])
 
-    # Stratified split: 70% train, 15% val, 15% test
+
     train_idx, temp_idx = train_test_split(
         np.arange(len(labels)),
         test_size=val_split + test_split,
@@ -63,13 +64,15 @@ def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.15, tes
     # Print class balance
     def show_class_balance(dataset, name):
         lbls = [dataset.dataset.samples[i][1] for i in dataset.indices]
-        print(f"  {name} class balance:", Counter(lbls))
+        counts = Counter(lbls)
+        print(f"  {name} class balance:", counts)
 
     total = len(full_dataset)
     print(f"📊 Stratified split (total={total}):")
     print(f"  Train={len(train_ds)} ({len(train_ds)/total:.1%})")
     print(f"  Val={len(val_ds)} ({len(val_ds)/total:.1%})")
     print(f"  Test={len(test_ds)} ({len(test_ds)/total:.1%})")
+
     show_class_balance(train_ds, "Train")
     show_class_balance(val_ds, "Val")
     show_class_balance(test_ds, "Test")
@@ -81,48 +84,62 @@ def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.15, tes
 # 2️⃣ Preprocessing / Augmentation
 # -------------------------
 def preprocess(train_ds, val_ds, test_ds, batch_size=32):
-    """Set up image transforms and DataLoaders."""
+    """Set up transforms and dataloaders."""
     transform_train = transforms.Compose([
         transforms.Resize((128, 128)),
+        transforms.RandomResizedCrop(128, scale=(0.8, 1.0)),
         transforms.RandomHorizontalFlip(),
-        transforms.RandomRotation(15),
-        transforms.ColorJitter(brightness=0.1, contrast=0.1),
+        transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(20),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3),
     ])
 
-    transform_eval = transforms.Compose([
+    transform_test = transforms.Compose([
         transforms.Resize((128, 128)),
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3),
     ])
 
-    # Assign transforms
     train_ds.dataset.transform = transform_train
-    val_ds.dataset.transform = transform_eval
-    test_ds.dataset.transform = transform_eval
+    val_ds.dataset.transform = transform_test
+    test_ds.dataset.transform = transform_test
 
-    # Dataloaders
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
     return train_loader, val_loader, test_loader
 
 
 # -------------------------
-# 3️⃣ Tiny CNN Model
+# 3️⃣ Model: Tiny CNN (with BatchNorm + Dropout)
 # -------------------------
 class TinyCNN(nn.Module):
     def __init__(self, num_classes=3):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(16, 32, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
-            nn.Conv2d(32, 64, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(3, 16, 3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(16, 32, 3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
             nn.Flatten(),
+            nn.Dropout(0.4),
+            nn.Linear(64 * 16 * 16, 128),
+            nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(64 * 16 * 16, 128), nn.ReLU(),
             nn.Linear(128, num_classes)
         )
 
@@ -131,40 +148,42 @@ class TinyCNN(nn.Module):
 
 
 # -------------------------
-# 4️⃣ Train
+# 4️⃣ Train Model
 # -------------------------
-def train(model, train_loader, val_loader, epochs=10, lr=1e-3):
-    """Train CNN with validation tracking."""
+def train(model, train_loader, val_loader, epochs=30, lr=1e-3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0
-
         for X, y in train_loader:
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(X), y)
+            outputs = model(X)
+            loss = criterion(outputs, y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * X.size(0)
 
-        # Validation
         model.eval()
         val_loss, correct = 0, 0
         with torch.no_grad():
             for X, y in val_loader:
                 X, y = X.to(device), y.to(device)
                 outputs = model(X)
-                val_loss += criterion(outputs, y).item() * X.size(0)
+                loss = criterion(outputs, y)
+                val_loss += loss.item() * X.size(0)
                 correct += (outputs.argmax(1) == y).sum().item()
 
+        scheduler.step()
         val_acc = correct / len(val_loader.dataset)
-        print(f"Epoch {epoch}/{epochs} | Train Loss: {train_loss/len(train_loader.dataset):.4f} | "
-              f"Val Loss: {val_loss/len(val_loader.dataset):.4f} | Val Acc: {val_acc:.4f}")
+        print(f"Epoch {epoch}/{epochs} | Train Loss: {train_loss/len(train_loader.dataset):.4f} "
+              f"| Val Loss: {val_loss/len(val_loader.dataset):.4f} | Val Acc: {val_acc:.4f}")
 
     return model
 
@@ -173,9 +192,8 @@ def train(model, train_loader, val_loader, epochs=10, lr=1e-3):
 # 5️⃣ Evaluate
 # -------------------------
 def evaluate(model, test_loader):
-    """Evaluate model and save metrics + confusion matrix."""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.eval()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     y_true, y_pred = [], []
     with torch.no_grad():
@@ -192,7 +210,6 @@ def evaluate(model, test_loader):
     precision, recall, f1, _ = precision_recall_fscore_support(
         y_true, y_pred, average="weighted", zero_division=0
     )
-
     report = classification_report(
         y_true, y_pred,
         labels=all_labels,
@@ -201,7 +218,7 @@ def evaluate(model, test_loader):
         output_dict=True,
     )
 
-    # Confusion matrix plot
+    # Confusion Matrix
     cm = confusion_matrix(y_true, y_pred, labels=all_labels)
     plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
@@ -214,7 +231,14 @@ def evaluate(model, test_loader):
     plt.close()
     print("✅ Confusion matrix saved as confusion_matrix.png")
 
-    metrics = {"accuracy": acc, "precision": precision, "recall": recall, "f1": f1, "report": report}
+    metrics = {
+        "accuracy": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "report": report,
+    }
+
     with open("metrics.json", "w") as f:
         json.dump(metrics, f, indent=4)
     print("✅ Metrics saved to metrics.json")
@@ -223,23 +247,13 @@ def evaluate(model, test_loader):
 
 
 # -------------------------
-# 6️⃣ Main Pipeline
+# 6️⃣ Main
 # -------------------------
 def main():
     train_ds, val_ds, test_ds = load_data()
-
-    # Optional: Inspect split balance
-    def inspect_split(ds, name):
-        labels = [ds.dataset.samples[i][1] for i in ds.indices]
-        print(f"{name} class distribution:", Counter(labels))
-
-    inspect_split(train_ds, "Train")
-    inspect_split(val_ds, "Val")
-    inspect_split(test_ds, "Test")
-
     train_loader, val_loader, test_loader = preprocess(train_ds, val_ds, test_ds)
     model = TinyCNN(num_classes=3)
-    model = train(model, train_loader, val_loader)
+    model = train(model, train_loader, val_loader, epochs=30)
     metrics = evaluate(model, test_loader)
 
     print("\n📈 Final Metrics:")
