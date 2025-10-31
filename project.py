@@ -3,7 +3,7 @@
 Team 2 — Bean Plant Disease Classification 🌱
 Dataset: therealoise/bean-disease-dataset (Kaggle)
 Goal: Classify bean leaves as healthy or diseased (3 classes)
-Model: Lightweight CNN (TinyCNN)
+Model: Enhanced TinyCNN (VGG-style)
 """
 
 # -------------------------
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, transforms
+from torchvision import datasets, transforms, models
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score,
@@ -41,7 +41,6 @@ def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.1, test
     data_dir = os.path.join(path, "Bean_Dataset")
     full_dataset = datasets.ImageFolder(root=data_dir)
     labels = np.array([y for _, y in full_dataset.samples])
-
 
     train_idx, temp_idx = train_test_split(
         np.arange(len(labels)),
@@ -86,18 +85,18 @@ def load_data(dataset_id="therealoise/bean-disease-dataset", val_split=0.1, test
 def preprocess(train_ds, val_ds, test_ds, batch_size=32):
     """Set up transforms and dataloaders."""
     transform_train = transforms.Compose([
-        transforms.Resize((128, 128)),
-        transforms.RandomResizedCrop(128, scale=(0.8, 1.0)),
+        transforms.RandomResizedCrop(224, scale=(0.7, 1.0), ratio=(0.8, 1.2)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(20),
-        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.RandomRotation(40),
+        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
+        transforms.RandomAffine(0, shear=10, scale=(0.8, 1.2)),
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3),
     ])
 
     transform_test = transforms.Compose([
-        transforms.Resize((128, 128)),
+        transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize([0.5]*3, [0.5]*3),
     ])
@@ -114,43 +113,27 @@ def preprocess(train_ds, val_ds, test_ds, batch_size=32):
 
 
 # -------------------------
-# 3️⃣ Model: Tiny CNN (with BatchNorm + Dropout)
+# 3️⃣ Model: MobileNetV2 Transfer Learning
 # -------------------------
-class TinyCNN(nn.Module):
-    def __init__(self, num_classes=3):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, 16, 3, padding=1),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
+def build_mobilenetv2(num_classes=3, freeze_backbone=True):
+    model = models.mobilenet_v2(weights="IMAGENET1K_V1")
+    if freeze_backbone:
+        for param in model.features.parameters():
+            param.requires_grad = False
 
-            nn.Conv2d(16, 32, 3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Conv2d(32, 64, 3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-
-            nn.Flatten(),
-            nn.Dropout(0.4),
-            nn.Linear(64 * 16 * 16, 128),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(128, num_classes)
-        )
-
-    def forward(self, x):
-        return self.net(x)
+    # Replace classifier
+    in_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(0.3),
+        nn.Linear(in_features, num_classes)
+    )
+    return model
 
 
 # -------------------------
-# 4️⃣ Train Model
+# 4️⃣ Train Model (unchanged)
 # -------------------------
-def train(model, train_loader, val_loader, epochs=30, lr=1e-3):
+def train(model, train_loader, val_loader, epochs=25, lr=1e-3):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
 
@@ -218,7 +201,6 @@ def evaluate(model, test_loader):
         output_dict=True,
     )
 
-    # Confusion Matrix
     cm = confusion_matrix(y_true, y_pred, labels=all_labels)
     plt.figure(figsize=(6, 5))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
@@ -252,8 +234,8 @@ def evaluate(model, test_loader):
 def main():
     train_ds, val_ds, test_ds = load_data()
     train_loader, val_loader, test_loader = preprocess(train_ds, val_ds, test_ds)
-    model = TinyCNN(num_classes=3)
-    model = train(model, train_loader, val_loader, epochs=30)
+    model = build_mobilenetv2(num_classes=3, freeze_backbone=False)
+    model = train(model, train_loader, val_loader, epochs=15, lr=1e-4)
     metrics = evaluate(model, test_loader)
 
     print("\n📈 Final Metrics:")
