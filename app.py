@@ -16,6 +16,10 @@ from torchvision import transforms
 from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import filedialog, messagebox
+try:
+    import cv2
+except Exception:
+    cv2 = None
 
 # Prefer importing the model builder from project.py to keep a single source of truth
 try:
@@ -113,6 +117,9 @@ class App:
         self.select_btn = tk.Button(self.btn_frame, text="Alege imagine frunză...", command=self.on_select_image)
         self.select_btn.grid(row=0, column=1, padx=5)
 
+        self.webcam_btn = tk.Button(self.btn_frame, text="Deschide webcam", command=self.on_webcam)
+        self.webcam_btn.grid(row=0, column=2, padx=5)
+
         self.img_lbl = tk.Label(self.root)
         self.img_lbl.pack(pady=5)
 
@@ -145,7 +152,8 @@ class App:
             self.img_lbl.config(image=self.tk_img)
             self.result_lbl.config(text=f"Imagine selectată: {os.path.basename(path)}")
             # Auto-run prediction after selecting image
-            self.on_predict()
+            # Use the opened PIL image directly for prediction to avoid re-loading from disk
+            self.predict_pil(img)
         except Exception as e:
             messagebox.showerror("Eroare imagine", f"Nu pot citi imaginea.\n{e}")
             self.image_path = None
@@ -166,6 +174,25 @@ class App:
 
         try:
             img = Image.open(self.image_path).convert("RGB")
+        except Exception as e:
+            messagebox.showerror("Predicție eșuată", f"Nu pot citi imaginea pentru predicție.\n{e}")
+            return
+
+        # Reuse PIL prediction helper
+        self.predict_pil(img)
+
+    def predict_pil(self, img: Image.Image):
+        """Run model on a PIL image and update the UI with the result."""
+        if self.model is None:
+            self.model, _ = load_model(None)
+            if self.model is None:
+                messagebox.showwarning(
+                    "Model lipsă",
+                    "Nu am găsit 'bean_mobilenetv2(.pth|.pt)'. Încarcă manual fișierul de greutăți din butonul 'Alege greutăți model...'."
+                )
+                return
+
+        try:
             x = self.transform(img).unsqueeze(0).to(device)
             with torch.no_grad():
                 logits = self.model(x)
@@ -183,6 +210,52 @@ class App:
         else:
             msg = f"Probleme detectate: {pred_class} — confidență {prob:.1%}"
         self.result_lbl.config(text=msg)
+
+    def on_webcam(self):
+        """Open webcam, allow user to capture a frame (press 'c'), then run prediction."""
+        if cv2 is None:
+            messagebox.showerror("Opencv lipsă", "Modulul 'opencv-python' nu este instalat. Rulează pip install opencv-python în mediu.")
+            return
+
+        cap = cv2.VideoCapture(0)
+        if not cap.isOpened():
+            messagebox.showerror("Webcam inaccesibil", "Nu pot deschide webcam-ul. Verifică dacă este conectat și liber.")
+            return
+
+        messagebox.showinfo("Instrucțiuni", "Fereastra webcam se deschide. Apasă 'c' pentru a captura, 'q' sau ESC pentru a anula.")
+        captured = None
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            disp = frame.copy()
+            cv2.putText(disp, "Press 'c' to capture, 'q' to quit", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.imshow("Webcam - Press c to capture", disp)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord('c'):
+                captured = frame.copy()
+                break
+            if key == ord('q') or key == 27:
+                break
+
+        cap.release()
+        cv2.destroyAllWindows()
+
+        if captured is None:
+            return
+
+        # Convert captured BGR frame to PIL RGB
+        try:
+            rgb = cv2.cvtColor(captured, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb)
+            disp = pil.copy()
+            disp.thumbnail((400,400))
+            self.tk_img = ImageTk.PhotoImage(disp)
+            self.img_lbl.config(image=self.tk_img)
+            # Use PIL image for prediction
+            self.predict_pil(pil)
+        except Exception as e:
+            messagebox.showerror("Eroare captură", f"Nu pot procesa captura webcam.\n{e}")
 
 
 def main():
