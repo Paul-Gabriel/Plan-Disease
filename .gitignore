@@ -7,3 +7,6 @@
 .venv/
 # IDE configuration files
 .idea/
+
+*.pyc
+__pycache__/

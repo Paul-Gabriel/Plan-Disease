@@ -236,6 +236,12 @@ def main():
     train_loader, val_loader, test_loader = preprocess(train_ds, val_ds, test_ds)
     model = build_mobilenetv2(num_classes=3, freeze_backbone=False)
     model = train(model, train_loader, val_loader, epochs=15, lr=1e-4)
+    # Save trained weights for the GUI app (app.py)
+    try:
+        torch.save(model.state_dict(), "bean_mobilenetv2.pth")
+        print("✅ Model weights saved to bean_mobilenetv2.pth")
+    except Exception as e:
+        print("⚠️ Could not save model weights:", e)
     metrics = evaluate(model, test_loader)
 
     print("\n📈 Final Metrics:")
