@@ -1,0 +1,10 @@
+timestamp,image,prediction,confidence
+2025-11-05T12:05:49.401983,uploads/upload_1762344349.jpg,healthy,97.56%
+2025-11-05T12:05:10.487213,uploads/upload_1762344310.jpg,angular_leaf_spot,96.70%
+2025-11-05T12:01:47.463854,uploads/upload_1762344107.jpg,angular_leaf_spot,96.70%
+2025-11-05T11:59:07.376085,uploads/upload_1762343947.jpg,angular_leaf_spot,96.70%
+2025-11-05T11:58:54.914084,uploads/upload_1762343934.jpg,healthy,51.87%
+2025-11-05T11:58:22.172483,uploads/upload_1762343902.jpg,healthy,51.87%
+2025-11-05T13:47:14.236789,webcam_capture.jpg,healthy,86.54%
+2025-11-05T13:46:52.072162,webcam_capture.jpg,bean_rust,53.20%
+2025-11-05T13:45:29.510753,C:/Users/flavia/Downloads/blackspot-plant-disease-1024x512.jpg,angular_leaf_spot,96.70%

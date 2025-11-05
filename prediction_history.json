@@ -1,0 +1,68 @@
+[
+  {
+    "timestamp": "2025-11-05T13:45:29.510753",
+    "image_path": "C:/Users/flavia/Downloads/blackspot-plant-disease-1024x512.jpg",
+    "prediction": "angular_leaf_spot",
+    "confidence": 0.9670052528381348
+  },
+  {
+    "timestamp": "2025-11-05T13:46:52.072162",
+    "image_path": "webcam_capture.jpg",
+    "prediction": "bean_rust",
+    "confidence": 0.5320428013801575
+  },
+  {
+    "timestamp": "2025-11-05T13:47:14.236789",
+    "image_path": "webcam_capture.jpg",
+    "prediction": "healthy",
+    "confidence": 0.8654294013977051
+  },
+  {
+    "timestamp": "2025-11-05T11:58:22.172483",
+    "image_path": "uploads/upload_1762343902.jpg",
+    "prediction": "healthy",
+    "confidence": 0.5186943411827087
+  },
+  {
+    "timestamp": "2025-11-05T11:58:54.914084",
+    "image_path": "uploads/upload_1762343934.jpg",
+    "prediction": "healthy",
+    "confidence": 0.5186943411827087
+  },
+  {
+    "timestamp": "2025-11-05T11:59:07.376085",
+    "image_path": "uploads/upload_1762343947.jpg",
+    "prediction": "angular_leaf_spot",
+    "confidence": 0.9670052528381348
+  },
+  {
+    "timestamp": "2025-11-05T12:01:47.463854",
+    "image_path": "uploads/upload_1762344107.jpg",
+    "prediction": "angular_leaf_spot",
+    "confidence": 0.9670052528381348
+  },
+  {
+    "timestamp": "2025-11-05T12:05:10.487213",
+    "image_path": "uploads/upload_1762344310.jpg",
+    "prediction": "angular_leaf_spot",
+    "confidence": 0.9670052528381348
+  },
+  {
+    "timestamp": "2025-11-05T12:05:49.401983",
+    "image_path": "uploads/upload_1762344349.jpg",
+    "prediction": "healthy",
+    "confidence": 0.9756052494049072
+  },
+  {
+    "timestamp": "2025-11-05T12:09:04.796433",
+    "image_path": "uploads/upload_1762344544.jpg",
+    "prediction": "healthy",
+    "confidence": 0.9734538197517395
+  },
+  {
+    "timestamp": "2025-11-05T15:31:14.346507",
+    "image_path": "uploads/upload_1762356674.jpg",
+    "prediction": "angular_leaf_spot",
+    "confidence": 0.9966821074485779
+  }
+]

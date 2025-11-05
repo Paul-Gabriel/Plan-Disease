@@ -15,12 +15,23 @@ import torch.nn as nn
 from torchvision import transforms
 from PIL import Image, ImageTk
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import ttk,filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
 try:
     import cv2
 except Exception:
     cv2 = None
+import json
+from datetime import datetime
+import webbrowser
 
+try:
+    import plotly.graph_objects as go
+    import pandas as pd
+    from plotly.subplots import make_subplots
+    PLOTLY_AVAILABLE = True
+except ImportError:
+    PLOTLY_AVAILABLE = False
 # Prefer importing the model builder from project.py to keep a single source of truth
 try:
     from project import build_mobilenetv2  # type: ignore
@@ -41,6 +52,7 @@ except Exception as e:
 
 
 CLASS_NAMES = ["angular_leaf_spot", "bean_rust", "healthy"]
+HISTORY_FILE="prediction_history.json"
 DEFAULT_WEIGHT_CANDIDATES = [
     "bean_mobilenetv2.pth",
     "bean_mobilenetv2.pt",
@@ -98,139 +110,341 @@ def load_model(weights_path: str | None = None) -> tuple[torch.nn.Module | None,
         messagebox.showerror("Încărcare model eșuată", f"Nu pot încărca greutățile din '{wp}'.\n{e}")
         return None, None
 
+class HistoryManager:
+    def __init__(self, file_path=HISTORY_FILE):
+        self.file_path = file_path
+        self.history = self.load_history()
 
+    def load_history(self):
+        if os.path.exists(self.file_path):
+            try:
+                with open(self.file_path, 'r') as f:
+                    return json.load(f)
+            except:
+                return []
+        return []
+
+    def add_prediction(self, image_path, prediction, confidence, timestamp=None):
+        if timestamp is None:
+            timestamp = datetime.now().isoformat()
+        entry = {
+            'timestamp': timestamp,
+            'image_path': image_path,
+            'prediction': prediction,
+            'confidence': confidence
+        }
+        self.history.append(entry)
+        self.save_history()
+        return entry
+
+    def save_history(self):
+        with open(self.file_path, 'w') as f:
+            json.dump(self.history, f, indent=2)
+
+    def get_history(self, limit=None):
+        history = self.history[::-1]  # Most recent first
+        return history[:limit] if limit else history
+
+    def export_csv(self, filepath):
+        if not self.history:
+            return False
+        try:
+            df = pd.DataFrame(self.history)
+            df.to_csv(filepath, index=False)
+            return True
+        except:
+            return False
 class App:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root):
         self.root = root
-        self.root.title("Bean Leaf Health Checker")
-        self.root.geometry("720x520")
-
-        self.model: torch.nn.Module | None = None
+        self.root.title("Bean Leaf Disease Analyzer")
+        self.root.geometry("1000x700")
+        self.setup_style()
+        
+        self.model = None
         self.transform = get_transform()
-        self.image_path: str | None = None
-        self.tk_img: ImageTk.PhotoImage | None = None
+        self.history_manager = HistoryManager()
+        self.current_image = None
+        self.current_image_path = None
+        
+        self.setup_ui()
+        self.load_model()
 
-        # UI Elements
-        self.btn_frame = tk.Frame(self.root)
-        self.btn_frame.pack(pady=10)
+    def setup_style(self):
+        style = ttk.Style()
+        style.configure('TNotebook', tabposition='n')
+        style.configure('TButton', padding=6)
+        style.configure('Header.TLabel', font=('Segoe UI', 12, 'bold'))
+        style.configure('Result.TLabel', font=('Segoe UI', 11))
 
-        self.select_btn = tk.Button(self.btn_frame, text="Alege imagine frunză...", command=self.on_select_image)
-        self.select_btn.grid(row=0, column=1, padx=5)
+    def setup_ui(self):
+        # Main notebook for tabs
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill='both', expand=True, padx=10, pady=5)
 
-        self.webcam_btn = tk.Button(self.btn_frame, text="Deschide webcam", command=self.on_webcam)
-        self.webcam_btn.grid(row=0, column=2, padx=5)
+        # Create tabs
+        self.predict_tab = ttk.Frame(self.notebook)
+        self.history_tab = ttk.Frame(self.notebook)
+        self.stats_tab = ttk.Frame(self.notebook)
 
-        self.img_lbl = tk.Label(self.root)
-        self.img_lbl.pack(pady=5)
+        self.notebook.add(self.predict_tab, text='Predict')
+        self.notebook.add(self.history_tab, text='History')
+        self.notebook.add(self.stats_tab, text='Statistics')
 
-        self.result_lbl = tk.Label(self.root, text="Rezultat: —", font=("Segoe UI", 12, "bold"))
-        self.result_lbl.pack(pady=8)
+        self.setup_predict_tab()
+        self.setup_history_tab()
+        self.setup_stats_tab()
 
-        # Try auto-load weights once (bean_mobilenetv2* prioritizat)
+    def setup_predict_tab(self):
+        # Top frame for buttons
+        btn_frame = ttk.Frame(self.predict_tab)
+        btn_frame.pack(pady=10)
+
+        ttk.Button(btn_frame, text="Select Image", command=self.on_select_image).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Open Webcam", command=self.on_webcam).pack(side='left', padx=5)
+
+        # Image display frame
+        self.display_frame = ttk.Frame(self.predict_tab)
+        self.display_frame.pack(fill='both', expand=True, pady=10)
+
+        # Left side: Original image
+        self.orig_frame = ttk.LabelFrame(self.display_frame, text="Original Image")
+        self.orig_frame.pack(side='left', fill='both', expand=True, padx=5)
+        self.orig_label = ttk.Label(self.orig_frame)
+        self.orig_label.pack(pady=5)
+
+        # Right side: Processed image + controls
+        self.proc_frame = ttk.LabelFrame(self.display_frame, text="Processed Image")
+        self.proc_frame.pack(side='left', fill='both', expand=True, padx=5)
+        self.proc_label = ttk.Label(self.proc_frame)
+        self.proc_label.pack(pady=5)
+
+        # Results frame
+        results_frame = ttk.Frame(self.predict_tab)
+        results_frame.pack(fill='x', pady=10, padx=10)
+        
+        self.result_label = ttk.Label(results_frame, text="Select an image to begin", style='Header.TLabel')
+        self.result_label.pack()
+        
+        self.detail_label = ttk.Label(results_frame, text="", style='Result.TLabel')
+        self.detail_label.pack()
+
+    def setup_history_tab(self):
+        # Controls frame
+        controls = ttk.Frame(self.history_tab)
+        controls.pack(fill='x', pady=5, padx=5)
+        
+        ttk.Button(controls, text="Export CSV", command=self.export_history).pack(side='left', padx=5)
+        ttk.Button(controls, text="Refresh", command=self.refresh_history).pack(side='left', padx=5)
+
+        # History view
+        self.history_tree = ttk.Treeview(self.history_tab, columns=("Time", "Image", "Prediction", "Confidence"),
+                                       show='headings')
+        self.history_tree.heading("Time", text="Time")
+        self.history_tree.heading("Image", text="Image")
+        self.history_tree.heading("Prediction", text="Prediction")
+        self.history_tree.heading("Confidence", text="Confidence")
+        
+        # Column widths
+        self.history_tree.column("Time", width=150)
+        self.history_tree.column("Image", width=200)
+        self.history_tree.column("Prediction", width=150)
+        self.history_tree.column("Confidence", width=100)
+        
+        self.history_tree.pack(fill='both', expand=True, padx=5, pady=5)
+        self.refresh_history()
+
+    def setup_stats_tab(self):
+        if not PLOTLY_AVAILABLE:
+            ttk.Label(self.stats_tab, text="Install plotly and pandas for interactive visualizations",
+                     style='Header.TLabel').pack(pady=20)
+            return
+
+        # Buttons to show different visualizations
+        btn_frame = ttk.Frame(self.stats_tab)
+        btn_frame.pack(fill='x', pady=5, padx=5)
+        
+        ttk.Button(btn_frame, text="Show Confusion Matrix", 
+                  command=lambda: self.show_plot("confusion_matrix.html")).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Show Metrics", 
+                  command=lambda: self.show_plot("class_bars.html")).pack(side='left', padx=5)
+        ttk.Button(btn_frame, text="Show Full Report", 
+                  command=lambda: self.show_plot("report.html")).pack(side='left', padx=5)
+
+        # Embed latest metrics if available
+        if os.path.exists("metrics.json"):
+            try:
+                with open("metrics.json") as f:
+                    metrics = json.load(f)
+                self.show_metrics_summary(metrics)
+            except:
+                pass
+
+    def show_metrics_summary(self, metrics):
+        summary = f"""
+        Overall Metrics:
+        Accuracy: {metrics.get('accuracy', 0):.4f}
+        Precision: {metrics.get('precision', 0):.4f}
+        Recall: {metrics.get('recall', 0):.4f}
+        F1 Score: {metrics.get('f1', 0):.4f}
+        """
+        ttk.Label(self.stats_tab, text=summary, style='Result.TLabel').pack(pady=20)
+
+    def show_plot(self, filename):
+        if os.path.exists(filename):
+            webbrowser.open(filename)
+        else:
+            messagebox.showinfo("Info", f"Plot {filename} not found. Run training first.")
+
+    def refresh_history(self):
+        for item in self.history_tree.get_children():
+            self.history_tree.delete(item)
+            
+        for entry in self.history_manager.get_history():
+            try:
+                dt = datetime.fromisoformat(entry['timestamp']).strftime('%Y-%m-%d %H:%M')
+            except:
+                dt = entry['timestamp']
+            self.history_tree.insert('', 'end', values=(
+                dt,
+                os.path.basename(entry['image_path']),
+                entry['prediction'],
+                f"{entry['confidence']:.1%}"
+            ))
+
+    def export_history(self):
+        filepath = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if filepath:
+            if self.history_manager.export_csv(filepath):
+                messagebox.showinfo("Success", f"History exported to {filepath}")
+            else:
+                messagebox.showerror("Error", "Could not export history")
+
+    def load_model(self):
         self.model, used_wp = load_model(None)
         if self.model is None:
-            self.result_lbl.config(text="Model neîncărcat. Alege un fișier .pth cu greutăți.")
+            self.result_label.config(text="Model not loaded. Select weights file.")
             messagebox.showwarning(
-                "Greutăți lipsă",
-                "Nu am găsit fișierul de greutăți 'bean_mobilenetv2(.pth|.pt)'.\n"
-                "Rulează întâi antrenarea (python project.py) sau selectează manual fișierul .pth."
+                "Missing Weights",
+                "Could not find model weights file.\nRun training first or select manually."
             )
         else:
-            self.result_lbl.config(text=f"Model încărcat: {os.path.basename(used_wp)}. Alege o imagine pentru verificare.")
+            self.result_label.config(text=f"Model loaded: {os.path.basename(used_wp)}")
 
     def on_select_image(self):
-        path = filedialog.askopenfilename(title="Alege imagine frunză",
-                                          filetypes=[("Imagini", "*.jpg;*.jpeg;*.png;*.bmp;*.webp"), ("Toate", "*.*")])
+        path = filedialog.askopenfilename(
+            title="Select Leaf Image",
+            filetypes=[("Images", "*.jpg;*.jpeg;*.png;*.bmp;*.webp"), ("All files", "*.*")]
+        )
         if not path:
             return
-        self.image_path = path
+        self.current_image_path = path
         try:
             img = Image.open(path).convert("RGB")
-            disp = img.copy()
-            disp.thumbnail((400, 400))
-            self.tk_img = ImageTk.PhotoImage(disp)
-            self.img_lbl.config(image=self.tk_img)
-            self.result_lbl.config(text=f"Imagine selectată: {os.path.basename(path)}")
-            # Auto-run prediction after selecting image
-            # Use the opened PIL image directly for prediction to avoid re-loading from disk
+            self.current_image = img
+            self.update_image_display(img)
+            self.result_label.config(text=f"Selected: {os.path.basename(path)}")
             self.predict_pil(img)
         except Exception as e:
-            messagebox.showerror("Eroare imagine", f"Nu pot citi imaginea.\n{e}")
-            self.image_path = None
+            messagebox.showerror("Error", f"Could not load image.\n{e}")
+            self.current_image_path = None
 
-    def on_predict(self):
-        if self.model is None:
-            # Try once more to auto-load (bean_mobilenetv2 preferred)
-            self.model, _ = load_model(None)
-            if self.model is None:
-                messagebox.showwarning(
-                    "Model lipsă",
-                    "Nu am găsit 'bean_mobilenetv2(.pth|.pt)'. Încarcă manual fișierul de greutăți din butonul 'Alege greutăți model...'."
-                )
-                return
-        if not self.image_path:
-            messagebox.showwarning("Imagine lipsă", "Te rog selectează o imagine de frunză.")
-            return
+    def update_image_display(self, img, processed=None):
+        # Original image
+        display_size = (350, 350)
+        orig_copy = img.copy()
+        orig_copy.thumbnail(display_size)
+        self.tk_orig = ImageTk.PhotoImage(orig_copy)
+        self.orig_label.config(image=self.tk_orig)
 
-        try:
-            img = Image.open(self.image_path).convert("RGB")
-        except Exception as e:
-            messagebox.showerror("Predicție eșuată", f"Nu pot citi imaginea pentru predicție.\n{e}")
-            return
-
-        # Reuse PIL prediction helper
-        self.predict_pil(img)
+        # Processed image (if provided, otherwise show same as original)
+        if processed is None:
+            processed = img
+        proc_copy = processed.copy()
+        proc_copy.thumbnail(display_size)
+        self.tk_proc = ImageTk.PhotoImage(proc_copy)
+        self.proc_label.config(image=self.tk_proc)
 
     def predict_pil(self, img: Image.Image):
-        """Run model on a PIL image and update the UI with the result."""
         if self.model is None:
             self.model, _ = load_model(None)
             if self.model is None:
                 messagebox.showwarning(
-                    "Model lipsă",
-                    "Nu am găsit 'bean_mobilenetv2(.pth|.pt)'. Încarcă manual fișierul de greutăți din butonul 'Alege greutăți model...'."
+                    "Model Missing",
+                    "Could not find model weights.\nRun training first or select manually."
                 )
                 return
 
         try:
+            # Get the processed image for display
+            processed = self.preprocess_for_display(img)
+            self.update_image_display(img, processed)
+
+            # Make prediction
             x = self.transform(img).unsqueeze(0).to(device)
             with torch.no_grad():
                 logits = self.model(x)
                 probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
                 pred_idx = int(probs.argmax())
+
+            pred_class = CLASS_NAMES[pred_idx]
+            prob = float(probs[pred_idx])
+
+            # Update UI with prediction
+            if pred_class == "healthy":
+                result = "HEALTHY LEAF"
+                msg = f"No diseases detected (confidence: {prob:.1%})"
+                color = "green"
+            else:
+                result = f"DISEASE DETECTED: {pred_class}"
+                msg = f"Confidence: {prob:.1%}"
+                color = "red"
+
+            self.result_label.config(text=result)
+            self.detail_label.config(text=msg)
+
+            # Add to history
+            self.history_manager.add_prediction(
+                self.current_image_path,
+                pred_class,
+                prob
+            )
+            self.refresh_history()
+
         except Exception as e:
-            messagebox.showerror("Predicție eșuată", f"A apărut o eroare la inferență.\n{e}")
-            return
+            messagebox.showerror("Prediction Failed", f"Error during prediction.\n{e}")
 
-        pred_class = CLASS_NAMES[pred_idx]
-        prob = float(probs[pred_idx])
-
-        if pred_class == "healthy":
-            msg = f"Rezultat: FĂRĂ PROBLEME (healthy) — confidență {prob:.1%}"
-        else:
-            msg = f"Probleme detectate: {pred_class} — confidență {prob:.1%}"
-        self.result_lbl.config(text=msg)
+    def preprocess_for_display(self, img):
+        """Show the preprocessing steps applied to the image"""
+        display = img.copy()
+        display = display.resize((224, 224))  # Match model input size
+        return display
 
     def on_webcam(self):
-        """Open webcam, allow user to capture a frame (press 'c'), then run prediction."""
         if cv2 is None:
-            messagebox.showerror("Opencv lipsă", "Modulul 'opencv-python' nu este instalat. Rulează pip install opencv-python în mediu.")
+            messagebox.showerror("OpenCV Missing", 
+                               "opencv-python not installed.\nRun: pip install opencv-python")
             return
 
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
-            messagebox.showerror("Webcam inaccesibil", "Nu pot deschide webcam-ul. Verifică dacă este conectat și liber.")
+            messagebox.showerror("Error", "Could not access webcam")
             return
 
-        messagebox.showinfo("Instrucțiuni", "Fereastra webcam se deschide. Apasă 'c' pentru a captura, 'q' sau ESC pentru a anula.")
+        messagebox.showinfo("Webcam", "Press 'c' to capture, 'q' or ESC to quit")
         captured = None
         while True:
             ret, frame = cap.read()
             if not ret:
                 break
             disp = frame.copy()
-            cv2.putText(disp, "Press 'c' to capture, 'q' to quit", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
-            cv2.imshow("Webcam - Press c to capture", disp)
+            cv2.putText(disp, "Press 'c' to capture", (10, 30),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,0), 2)
+            cv2.imshow("Webcam", disp)
+            
             key = cv2.waitKey(1) & 0xFF
             if key == ord('c'):
                 captured = frame.copy()
@@ -244,19 +458,15 @@ class App:
         if captured is None:
             return
 
-        # Convert captured BGR frame to PIL RGB
         try:
             rgb = cv2.cvtColor(captured, cv2.COLOR_BGR2RGB)
             pil = Image.fromarray(rgb)
-            disp = pil.copy()
-            disp.thumbnail((400,400))
-            self.tk_img = ImageTk.PhotoImage(disp)
-            self.img_lbl.config(image=self.tk_img)
-            # Use PIL image for prediction
+            self.current_image = pil
+            self.current_image_path = "webcam_capture.jpg"
+            self.update_image_display(pil)
             self.predict_pil(pil)
         except Exception as e:
-            messagebox.showerror("Eroare captură", f"Nu pot procesa captura webcam.\n{e}")
-
+            messagebox.showerror("Error", f"Could not process webcam image.\n{e}")
 
 def main():
     root = tk.Tk()

@@ -28,6 +28,13 @@ from sklearn.metrics import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
+from tqdm import tqdm
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+import pandas as pd
+import plotly.graph_objects as go
+import datetime
 
 
 # -------------------------
@@ -141,10 +148,15 @@ def train(model, train_loader, val_loader, epochs=25, lr=1e-3):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.5)
 
+    train_losses = []
+    val_losses = []
+    val_accuracies = []
+
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0
-        for X, y in train_loader:
+        batches = 0
+        for X, y in tqdm(train_loader, desc=f"Epoch {epoch}/{epochs} [train]", unit="batch", leave=False):
             X, y = X.to(device), y.to(device)
             optimizer.zero_grad()
             outputs = model(X)
@@ -152,22 +164,34 @@ def train(model, train_loader, val_loader, epochs=25, lr=1e-3):
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * X.size(0)
+            batches+=X.size(0)
+
+            tqdm.write("") if False else None
+
+        avg_train_loss = train_loss / len(train_loader.dataset)
+        train_losses.append(avg_train_loss)
 
         model.eval()
         val_loss, correct = 0, 0
         with torch.no_grad():
-            for X, y in val_loader:
+            for X, y in tqdm(val_loader, desc=f"Epoch {epoch}/{epochs} [val]", unit="batch", leave=False):
                 X, y = X.to(device), y.to(device)
                 outputs = model(X)
                 loss = criterion(outputs, y)
                 val_loss += loss.item() * X.size(0)
                 correct += (outputs.argmax(1) == y).sum().item()
+        
+        avg_val_loss = val_loss / len(val_loader.dataset)
+        val_acc = correct / len(val_loader.dataset)
+
+        val_losses.append(avg_val_loss)
+        val_accuracies.append(val_acc)
 
         scheduler.step()
-        val_acc = correct / len(val_loader.dataset)
-        print(f"Epoch {epoch}/{epochs} | Train Loss: {train_loss/len(train_loader.dataset):.4f} "
-              f"| Val Loss: {val_loss/len(val_loader.dataset):.4f} | Val Acc: {val_acc:.4f}")
-
+        tqdm.write(
+            f"Epoch {epoch}/{epochs} | Train Loss: {avg_train_loss:.4f} | "
+            f"Val Loss: {avg_val_loss:.4f} | Val Acc: {val_acc:.4f} | LR: {optimizer.param_groups[0]['lr']:.2e}"
+        )
     return model
 
 
@@ -224,8 +248,9 @@ def evaluate(model, test_loader):
     with open("metrics.json", "w") as f:
         json.dump(metrics, f, indent=4)
     print("✅ Metrics saved to metrics.json")
+    print_metrics_rich(metrics)
 
-    return metrics
+    return (metrics,cm)
 
 
 # -------------------------
@@ -242,10 +267,157 @@ def main():
         print("✅ Model weights saved to bean_mobilenetv2.pth")
     except Exception as e:
         print("⚠️ Could not save model weights:", e)
-    metrics = evaluate(model, test_loader)
+    metrics,cm = evaluate(model, test_loader)
+    class_names = ["angular_leaf_spot", "bean_rust", "healthy"]
+    generate_html_report(metrics, cm.tolist() if hasattr(cm, "tolist") else cm, class_names)
 
     print("\n📈 Final Metrics:")
     print(json.dumps(metrics["report"], indent=4))
+    try:
+        out = plot_metrics_bars(metrics, out_path="class_bars.html")
+        if out:
+            print(f"✅ Per-class metric bars saved to {out}")
+            # webbrowser.open_new_tab(out)   # optional
+    except Exception as e:
+        print("⚠️  Plotly bars failed:", e)
+
+# -------------------------
+# 7.  Results Visualization & Reporting
+# -------------------------
+def print_metrics_rich(metrics: dict):
+    """
+    Nicely print classification report + summary using rich.
+    Expects `metrics` to contain keys: 'accuracy','precision','recall','f1','report'
+    where 'report' is the sklearn classification_report as dict.
+    """
+    console = Console()
+    # Summary panel
+    summary = (
+        f"[bold green]Accuracy:[/bold green] {metrics.get('accuracy', 0):.4f}\n"
+        f"[bold yellow]Precision (weighted):[/bold yellow] {metrics.get('precision', 0):.4f}\n"
+        f"[bold cyan]Recall (weighted):[/bold cyan] {metrics.get('recall', 0):.4f}\n"
+        f"[bold magenta]F1 (weighted):[/bold magenta] {metrics.get('f1', 0):.4f}\n"
+    )
+    console.print(Panel(summary, title="Final metrics", expand=False))
+
+    # Classification report table
+    report = metrics.get("report", {})
+    # If report contains top-level keys such as 'accuracy' or 'macro avg', separate class rows vs summary rows
+    class_rows = {k: v for k, v in report.items() if isinstance(v, dict)}
+    if class_rows:
+        table = Table(title="Classification Report", show_lines=True)
+        table.add_column("Class", style="bold")
+        table.add_column("Precision", justify="right")
+        table.add_column("Recall", justify="right")
+        table.add_column("F1-score", justify="right")
+        table.add_column("Support", justify="right")
+        for cls, row in class_rows.items():
+            p = row.get("precision", 0)
+            r = row.get("recall", 0)
+            f = row.get("f1-score", 0)
+            s = int(row.get("support", 0))
+            table.add_row(cls, f"{p:.3f}", f"{r:.3f}", f"{f:.3f}", str(s))
+        console.print(table)
+
+def plot_metrics_bars(metrics: dict, out_path: str = "class_bars.html"):
+    report = metrics.get("report", {})
+    class_rows = {k: v for k, v in report.items() if isinstance(v, dict)}
+    if not class_rows:
+        return None
+    df = pd.DataFrame(class_rows).T[["precision", "recall", "f1-score"]].rename(columns={"f1-score": "f1"})
+    fig = go.Figure()
+    for col in df.columns:
+        fig.add_trace(go.Bar(name=col, x=df.index.tolist(), y=df[col].tolist()))
+    fig.update_layout(barmode="group", title="Per-class Precision / Recall / F1", yaxis_title="Score", width=800, height=500)
+    fig.write_html(out_path, include_plotlyjs="cdn")
+    return out_path
+
+# -------------------------
+# 8. HTML Report Generation
+# -------------------------
+def generate_html_report(metrics: dict, cm: list, class_names: list, out_path: str = "report.html"):
+    """
+    Create a single self-contained HTML file with:
+     - interactive Plotly confusion matrix
+     - HTML table for classification report (pandas-styled)
+     - small header with timestamp and summary
+    Returns the written path.
+    """
+    # Prepare classification table
+    report = metrics.get("report", {})
+    # Convert class rows to DataFrame (skip macro/weighted/accuracy entries if present)
+    class_rows = {k: v for k, v in report.items() if isinstance(v, dict)}
+    if class_rows:
+        df = pd.DataFrame(class_rows).T  # columns: precision, recall, f1-score, support
+        # nicer column names
+        df = df.rename(columns={"f1-score": "f1", "support": "support"})
+        df_html = df.style.format({
+            "precision": "{:.3f}",
+            "recall": "{:.3f}",
+            "f1": "{:.3f}",
+            "support": "{:.0f}"
+        }).set_caption("Per-class metrics").to_html()
+    else:
+        df_html = "<p>No class-level report available</p>"
+
+    # Plotly confusion matrix
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=cm,
+            x=class_names,
+            y=class_names,
+            colorscale="Blues",
+            reversescale=False,
+            hovertemplate="Pred: %{x}<br>True: %{y}<br>Count: %{z}<extra></extra>"
+        )
+    )
+    fig.update_layout(title="Confusion Matrix", xaxis_title="Predicted", yaxis_title="True", width=700, height=600)
+
+    # Convert Plotly fig to html fragment (no full_html so we can build our own page)
+    plotly_fragment = fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+    # Small summary block
+    summary_html = f"""
+    <div style="font-family: Arial, sans-serif; margin-bottom: 12px;">
+      <h2>Bean Disease Classification Report</h2>
+      <p>Generated: {datetime.datetime.now().isoformat()}</p>
+      <p><strong>Accuracy:</strong> {metrics.get('accuracy', 0):.4f} &nbsp;
+         <strong>Precision:</strong> {metrics.get('precision', 0):.4f} &nbsp;
+         <strong>Recall:</strong> {metrics.get('recall', 0):.4f} &nbsp;
+         <strong>F1:</strong> {metrics.get('f1', 0):.4f}</p>
+    </div>
+    """
+
+    # Combine into a simple HTML page
+    html = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <title>Classification Report</title>
+      <style>
+        body {{ font-family: Arial, Helvetica, sans-serif; margin: 24px; }}
+        .container {{ display: flex; gap: 24px; align-items: flex-start; }}
+        .left {{ flex: 1 1 420px; }}
+        .right {{ flex: 1 1 320px; }}
+      </style>
+    </head>
+    <body>
+      {summary_html}
+      <div class="container">
+        <div class="left">
+          {plotly_fragment}
+        </div>
+        <div class="right">
+          {df_html}
+        </div>
+      </div>
+    </body>
+    </html>
+    """
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(html)
+    return out_path
 
 
 if __name__ == "__main__":
